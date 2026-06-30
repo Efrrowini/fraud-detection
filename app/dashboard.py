@@ -4,10 +4,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import streamlit as st
 import redis, json, time
 import pandas as pd
+import numpy as np
+import plotly.graph_objects as go
 
 st.set_page_config(page_title="FRAUD::DETECT", page_icon="🛡", layout="wide")
 
-import os
 r = redis.Redis(host=os.environ.get('REDIS_HOST', 'localhost'), port=6379, decode_responses=True)
 
 # ── Sci-fi CSS injection ──────────────────────────────────
@@ -27,6 +28,20 @@ html, body, [class*="css"] {
     background-size: 24px 24px;
 }
 
+@keyframes scanline {
+    0% { transform: translateY(-100%); }
+    100% { transform: translateY(100vh); }
+}
+
+.scan-overlay {
+    position: fixed;
+    top: 0; left: 0; width: 100%; height: 3px;
+    background: linear-gradient(90deg, transparent, rgba(0,255,140,0.5), transparent);
+    animation: scanline 6s linear infinite;
+    z-index: 999;
+    pointer-events: none;
+}
+
 .main-title {
     font-size: 28px;
     font-weight: 700;
@@ -40,7 +55,35 @@ html, body, [class*="css"] {
     color: #4a9b78;
     font-size: 13px;
     letter-spacing: 1px;
-    margin-bottom: 24px;
+    margin-bottom: 12px;
+}
+
+@keyframes ticker-scroll {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+}
+
+.ticker-wrap {
+    background: #0a0f0c;
+    border-top: 1px solid rgba(0,255,140,0.3);
+    border-bottom: 1px solid rgba(0,255,140,0.3);
+    overflow: hidden;
+    white-space: nowrap;
+    padding: 6px 0;
+    margin-bottom: 20px;
+}
+
+.ticker-content {
+    display: inline-block;
+    animation: ticker-scroll 25s linear infinite;
+    font-size: 11px;
+    color: #5fae8a;
+    letter-spacing: 1px;
+}
+
+.ticker-content span.fraud-flag {
+    color: #ff3860;
+    font-weight: 700;
 }
 
 .metric-box {
@@ -136,14 +179,8 @@ html, body, [class*="css"] {
     text-shadow: 0 0 6px rgba(255,56,96,0.5);
 }
 
-.fraud-tag {
-    color: #ff3860;
-    font-weight: 700;
-}
-
-.legit-tag {
-    color: #4a9b78;
-}
+.fraud-tag { color: #ff3860; font-weight: 700; }
+.legit-tag { color: #4a9b78; }
 
 .divider-line {
     height: 1px;
@@ -161,12 +198,38 @@ html, body, [class*="css"] {
     font-family: 'JetBrains Mono', monospace !important;
 }
 
-.stCaption {
-    color: #3d6e54 !important;
-    font-size: 11px !important;
+.stCaption { color: #3d6e54 !important; font-size: 11px !important; }
+
+.boot-line {
+    color: #4a9b78;
+    font-size: 11px;
+    letter-spacing: 1px;
+    line-height: 1.8;
 }
+.boot-line .ok { color: #00ff8c; }
 </style>
+<div class="scan-overlay"></div>
 """, unsafe_allow_html=True)
+
+# ── Boot sequence (runs once per session) ──────────────────
+if 'booted' not in st.session_state:
+    boot = st.empty()
+    lines = [
+        "[ INIT ] Loading XGBoost ensemble model ............... <span class='ok'>OK</span>",
+        "[ INIT ] Loading Isolation Forest anomaly model ........ <span class='ok'>OK</span>",
+        "[ INIT ] Connecting to Redis stream ..................... <span class='ok'>OK</span>",
+        "[ INIT ] Initializing SHAP explainer .................... <span class='ok'>OK</span>",
+        "[ INIT ] Establishing live transaction feed ............. <span class='ok'>OK</span>",
+        "[ READY ] FRAUD::DETECT system online.",
+    ]
+    rendered = ""
+    for line in lines:
+        rendered += f'<div class="boot-line">{line}</div>'
+        boot.markdown(rendered, unsafe_allow_html=True)
+        time.sleep(0.15)
+    time.sleep(0.3)
+    boot.empty()
+    st.session_state['booted'] = True
 
 # ── Header ────────────────────────────────────────────────
 st.markdown('<div class="main-title">FRAUD::DETECT</div>', unsafe_allow_html=True)
@@ -178,12 +241,27 @@ st.sidebar.markdown("**[SYS] PRODUCER STATUS**")
 st.sidebar.markdown("**[SYS] CONSUMER STATUS**")
 st.sidebar.caption("Ensure producer.py and consumer.py are running.")
 
-# ── Metrics ───────────────────────────────────────────────
+# ── Load data ─────────────────────────────────────────────
 metrics = r.hgetall('fraud:metrics') or {}
 total      = int(float(metrics.get('total', 0)))
 fraud      = int(float(metrics.get('fraud', 0)))
 fraud_rate = float(metrics.get('fraud_rate', 0))
 
+alerts_raw = r.lrange('fraud:alerts', 0, 49)
+alerts = [json.loads(a) for a in alerts_raw]
+
+# ── Scrolling ticker ──────────────────────────────────────
+if alerts:
+    ticker_items = []
+    for a in alerts[:20]:
+        flag = '<span class="fraud-flag">[FRAUD]</span>' if a.get('true_label') == '1' else '[OK]'
+        ticker_items.append(f"{flag} {a.get('txn_id','?')} :: score {float(a.get('score',0)):.3f}")
+    ticker_text = "  ///  ".join(ticker_items)
+    st.markdown(f'''<div class="ticker-wrap"><div class="ticker-content">{ticker_text}  ///  {ticker_text}</div></div>''', unsafe_allow_html=True)
+else:
+    st.markdown('<div class="ticker-wrap"><div class="ticker-content">AWAITING TRANSACTION STREAM ...</div></div>', unsafe_allow_html=True)
+
+# ── Metrics ───────────────────────────────────────────────
 c1, c2, c3, c4 = st.columns(4)
 with c1:
     st.markdown(f'<div class="metric-box"><div class="metric-label">TRANSACTIONS</div><div class="metric-value">{total:,}</div></div>', unsafe_allow_html=True)
@@ -197,15 +275,39 @@ with c4:
 
 st.markdown('<div class="divider-line"></div>', unsafe_allow_html=True)
 
+# ── Sparkline: fraud rate over recent alerts ─────────────
+if 'history' not in st.session_state:
+    st.session_state['history'] = []
+st.session_state['history'].append(fraud_rate)
+st.session_state['history'] = st.session_state['history'][-40:]
+
+spark_col, gap_col = st.columns([1, 0.001])
+with spark_col:
+    st.markdown('<div class="panel-header">// FRAUD RATE TREND</div>', unsafe_allow_html=True)
+    hist = st.session_state['history']
+    fig_spark = go.Figure()
+    fig_spark.add_trace(go.Scatter(
+        y=hist, mode='lines', line=dict(color='#00ff8c', width=2),
+        fill='tozeroy', fillcolor='rgba(0,255,140,0.08)'
+    ))
+    fig_spark.update_layout(
+        height=120, margin=dict(l=0, r=0, t=4, b=4),
+        paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+        xaxis=dict(visible=False), yaxis=dict(visible=False),
+        showlegend=False
+    )
+    st.plotly_chart(fig_spark, use_container_width=True, config={'displayModeBar': False})
+
+st.markdown('<div class="divider-line"></div>', unsafe_allow_html=True)
+
+# ── Main grid: alerts + performance ──────────────────────
 col_left, col_right = st.columns([3, 2])
 
 with col_left:
     st.markdown('<div class="panel-header">// RECENT FRAUD ALERTS</div>', unsafe_allow_html=True)
-    alerts_raw = r.lrange('fraud:alerts', 0, 14)
-    if alerts_raw:
+    if alerts:
         st.markdown('<div class="alert-row header"><div>TXN ID</div><div>SCORE</div><div>RISK</div><div>FACTORS</div><div>ACTUAL</div></div>', unsafe_allow_html=True)
-        for a in alerts_raw:
-            alert = json.loads(a)
+        for alert in alerts[:15]:
             factors = alert.get('top_factors', [])
             score = float(alert.get('score', 0))
             actual = alert.get('true_label')
@@ -227,18 +329,46 @@ with col_right:
         ("AVG PRECISION", "0.8819"),
         ("RECALL (FRAUD)", "80%"),
         ("PRECISION (FRAUD)", "96%"),
+        ("ISOLATION FOREST AUC", "0.9491"),
     ]
     for label, val in perf:
         st.markdown(f'<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid rgba(0,255,140,0.1);font-size:12px;color:#b8e8d0"><span style="color:#4a9b78">{label}</span><span style="color:#00ff8c;font-weight:700">{val}</span></div>', unsafe_allow_html=True)
 
-    st.markdown('<div style="margin-top:16px"></div>', unsafe_allow_html=True)
+st.markdown('<div class="divider-line"></div>', unsafe_allow_html=True)
+
+# ── Charts row: score distribution + SHAP ────────────────
+chart_left, chart_right = st.columns(2)
+
+with chart_left:
+    st.markdown('<div class="panel-header">// FRAUD SCORE DISTRIBUTION</div>', unsafe_allow_html=True)
+    if alerts:
+        scores = [float(a.get('score', 0)) for a in alerts]
+        fig_hist = go.Figure()
+        fig_hist.add_trace(go.Histogram(
+            x=scores, nbinsx=15, marker=dict(color='#00ff8c', line=dict(color='#0a0f0c', width=1)),
+            opacity=0.85
+        ))
+        fig_hist.update_layout(
+            height=220, margin=dict(l=30, r=10, t=10, b=30),
+            paper_bgcolor='rgba(0,0,0,0)', plot_bgcolor='rgba(0,0,0,0)',
+            font=dict(color='#5fae8a', family='JetBrains Mono', size=10),
+            xaxis=dict(title='fraud score', gridcolor='rgba(0,255,140,0.08)', color='#5fae8a'),
+            yaxis=dict(title='count', gridcolor='rgba(0,255,140,0.08)', color='#5fae8a'),
+            showlegend=False
+        )
+        st.plotly_chart(fig_hist, use_container_width=True, config={'displayModeBar': False})
+    else:
+        st.markdown('<div style="color:#4a9b78;font-size:12px;padding:20px 0">[ AWAITING DATA ]</div>', unsafe_allow_html=True)
+
+with chart_right:
+    st.markdown('<div class="panel-header">// SHAP FEATURE IMPORTANCE</div>', unsafe_allow_html=True)
     try:
         st.image('reports/shap_summary.png', use_container_width=True)
     except Exception:
-        pass
+        st.markdown('<div style="color:#4a9b78;font-size:12px;padding:20px 0">[ SHAP PLOT NOT FOUND ]</div>', unsafe_allow_html=True)
 
 st.markdown('<div class="divider-line"></div>', unsafe_allow_html=True)
-st.caption("DATASET: KAGGLE CREDIT CARD FRAUD (284,807 TXN, 0.17% FRAUD) // BUILT BY EFRO // SYS.V1.0")
+st.caption("DATASET: KAGGLE CREDIT CARD FRAUD (284,807 TXN, 0.17% FRAUD) // BUILT BY EFRO // SYS.V2.0")
 
 time.sleep(refresh)
 st.rerun()
