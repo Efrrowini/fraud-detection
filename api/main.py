@@ -13,7 +13,8 @@ app.add_middleware(CORSMiddleware, allow_origins=["*"],
 model     = joblib.load("models/xgb_model.pkl")
 threshold = joblib.load("models/threshold.pkl")
 explainer = shap.TreeExplainer(model)
-r = redis.Redis(host='localhost', port=6379, decode_responses=True)
+import os
+r = redis.Redis(host=os.environ.get('REDIS_HOST', 'localhost'), port=6379, decode_responses=True)
 
 FEATURE_COLS = [c for c in
     pd.read_csv('data/processed/test.csv', nrows=0).columns

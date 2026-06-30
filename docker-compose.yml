@@ -1,0 +1,69 @@
+version: '3.8'
+
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    ports:
+      - "8000:8000"
+    depends_on:
+      - redis
+    environment:
+      - REDIS_HOST=redis
+    volumes:
+      - ./models:/app/models
+      - ./data/processed:/app/data/processed
+
+  producer:
+    build:
+      context: .
+      dockerfile: Dockerfile.stream
+    command: python streaming/producer.py
+    depends_on:
+      - redis
+    environment:
+      - REDIS_HOST=redis
+    volumes:
+      - ./data/processed:/app/data/processed
+
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile.stream
+    command: python streaming/consumer.py
+    depends_on:
+      - redis
+      - api
+    environment:
+      - REDIS_HOST=redis
+    volumes:
+      - ./models:/app/models
+      - ./data/processed:/app/data/processed
+
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    command: streamlit run app/dashboard.py --server.port 8501 --server.address 0.0.0.0
+    ports:
+      - "8501:8501"
+    depends_on:
+      - redis
+      - consumer
+    environment:
+      - REDIS_HOST=redis
+    volumes:
+      - ./models:/app/models
+      - ./reports:/app/reports
+      - ./data/processed:/app/data/processed
+
+volumes:
+  redis_data:

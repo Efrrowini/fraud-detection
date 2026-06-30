@@ -7,7 +7,8 @@ import pandas as pd
 
 st.set_page_config(page_title="FRAUD::DETECT", page_icon="🛡", layout="wide")
 
-r = redis.Redis(host='localhost', port=6379, decode_responses=True)
+import os
+r = redis.Redis(host=os.environ.get('REDIS_HOST', 'localhost'), port=6379, decode_responses=True)
 
 # ── Sci-fi CSS injection ──────────────────────────────────
 st.markdown("""
